@@ -2,11 +2,20 @@
 
 interface
 uses
-  WinSock2,SysUtils;
+  WinSock2,SysUtils,uMemBuffer,Winapi.Windows,kadin.WebSocket;
 Type
   ESelectSocketError = class(Exception)
     ErrorCode : Integer;
   end;
+
+  TKDRecvAbleSocket = class;
+
+  TKDSocketCloseEventType = (sceRead,sceWrite,sceSelfClose,sceError);
+
+  TKDSocketCloseEvent = procedure (Sender:TKDRecvAbleSocket ; CloseEventType : TKDSocketCloseEventType ; ErrorCode:Integer) of Object;
+
+  TKDSocketRecvTextEvent = procedure (Sender:TKDRecvAbleSocket ; const Text:String);
+  TKDSocketBinaryFrameEvent = procedure (Sender:TKDRecvAbleSocket ; const pBuffer:Pointer ; Size : Cardinal);
 
   //注意 Property 可能会抛异常 函数类的不会抛异常
   TKDSocket = class
@@ -37,6 +46,30 @@ Type
     property SendBufferSize : Integer Read GetSendBufferSize write SetSendBufferSize;
     property RecvBufferSize : Integer read GetRecvbBufferSize write SetRecvBufferSize;
     property BlockMode : Boolean read _isBlockMode write SetBlockMode;
+  end;
+
+  //具有接受数据能力的Socket
+  TKDRecvAbleSocket = class(TKDSocket)
+  private
+    FRecivedBuffer : TuMemBuffer;  //待处理的内容
+    FSendBuffer : TuMemBuffer;
+    FOnText: TKDSocketRecvTextEvent;
+    FOnBinary: TKDSocketBinaryFrameEvent;
+    FOnClose: TKDSocketCloseEvent;
+    procedure SetOnBinary(const Value: TKDSocketBinaryFrameEvent);
+    procedure SetOnClose(const Value: TKDSocketCloseEvent);
+    procedure SetOnText(const Value: TKDSocketRecvTextEvent);     //待发送的内容
+  protected
+    function TryRecv():Boolean;
+    procedure TrySend();virtual;
+    procedure RecvWebSocketFrame(var Frame:TWebSocketFrame);
+  public
+    procedure Run();
+    constructor Create(RecvBufferSize : Integer = 8192 ;SendBufferSize:Integer = 8192);
+
+    Property OnText : TKDSocketRecvTextEvent read FOnText write SetOnText;
+    property OnBinary : TKDSocketBinaryFrameEvent read FOnBinary write SetOnBinary;
+    property OnClose : TKDSocketCloseEvent read FOnClose write SetOnClose;
   end;
 
 implementation
@@ -263,6 +296,137 @@ begin
   Ret := setsockopt( _fd, SOL_SOCKET, SO_SNDBUF, @Size, ResultLen );
   if Ret <> 0 then
     RaiseSocketException(Ret);
+end;
+
+{ TKDRecvAbleSocket }
+
+constructor TKDRecvAbleSocket.Create(RecvBufferSize, SendBufferSize: Integer);
+begin
+  FRecivedBuffer := TuMemBuffer.Create(RecvBufferSize);
+  FSendBuffer := TuMemBuffer.Create(SendBufferSize);
+end;
+
+procedure TKDRecvAbleSocket.RecvWebSocketFrame(var Frame: TWebSocketFrame);
+begin
+  case Frame.Opcode of
+    OPCODE_TEXT_FRAME :
+    begin
+      TEncoding.UTF8.GetString()
+    end;
+    OPCODE_BINARY_FRAME:
+    begin
+
+    end;
+    OPCODE_CLOSE_FRAME:
+    Begin
+
+    End;
+    OPCODE_PING_FRAME:
+    Begin
+
+    End;
+    OPCODE_PONG_FRAME:
+    Begin
+
+    End;
+  end;
+end;
+
+procedure TKDRecvAbleSocket.Run;
+var
+  PBuffer:Pointer;
+  Frame:TWebSocketFrame;
+  ProcessBytes:Integer;
+begin
+  if TryRecv() then
+  begin
+    PBuffer := FRecivedBuffer.Memory;
+    ProcessBytes := UnPackWebSocketFrame(PBuffer,FRecivedBuffer.Size,Frame);
+    if ProcessBytes > 0 then
+    begin
+      RecvWebSocketFrame(Frame);
+    end;
+
+  end;
+
+  TrySend();
+end;
+
+procedure TKDRecvAbleSocket.SetOnBinary(const Value: TKDSocketBinaryFrameEvent);
+begin
+  FOnBinary := Value;
+end;
+
+procedure TKDRecvAbleSocket.SetOnClose(const Value: TKDSocketCloseEvent);
+begin
+  FOnClose := Value;
+end;
+
+procedure TKDRecvAbleSocket.SetOnText(const Value: TKDSocketRecvTextEvent);
+begin
+  FOnText := Value;
+end;
+
+procedure TKDRecvAbleSocket.TryRecv;
+var
+  ErrorCode, nReadCount: Integer;
+  nBuffSize: Cardinal;
+  fdcloseset: TFDSet;
+  fdexceptionset: TFDSet;
+  TimereadVal: timeval;
+  nRecved: Integer;
+begin
+  if _fd = INVALID_SOCKET then
+    Exit(False);
+
+  ErrorCode := ioctlsocket(_fd, FIONREAD, nBuffSize);
+  if ErrorCode = NO_ERROR then
+  begin
+    if nBuffSize <= 0 then
+      Exit(False);
+
+    While (FRecivedBuffer.LeftSize < nBuffSize ) do
+    begin
+      FRecivedBuffer.GrowUp();
+    end;
+
+    nReadCount := WinSock2.recv(_fd , FRecivedBuffer.Memory^, nBuffSize, 0);
+
+    //连接被关闭
+    if nReadCount = 0 then
+    begin
+      Close();
+      Exit(False);
+    end;
+
+    if nReadCount = SOCKET_ERROR then
+    begin
+      ErrorCode := WSAGetLastError();
+      if ErrorCode <> WSAEWOULDBLOCK then
+      begin
+        OnSocketError(ErrorCode);
+        Close();
+      end;
+      Exit(False);
+    end
+    else
+    begin
+      FRecivedBuffer.SizeAdd(nBuffSize);
+      Exit(True);
+    end;
+
+  end
+  else
+  begin
+    ErrorCode := WSAGetLastError();
+    OnSocketError(ErrorCode);
+    Exit(False);
+  end;
+end;
+
+procedure TKDRecvAbleSocket.TrySend;
+begin
+
 end;
 
 end.
