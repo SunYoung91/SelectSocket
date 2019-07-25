@@ -7,21 +7,34 @@ Type
   //连接上服务器的Socket  不可手动建立
   TKDServerClientSocket = class(TKDRecvAbleSocket)
   public
-    ServerSocketIndex : Cardinal; //在ServerSocket 中的下标
+    ServerSocketIndex : Integer; //在ServerSocket 中的下标
   private
     procedure SetSocketData(SocketHandle:TSocket ;AddrIn : TSockAddrIn);
   end;
 
+  TOnClientConnect = procedure (Socket: TKDSocket);
+  TOnClientAccept = procedure (const IP:string ; var Accept:Boolean);
+  TOnClientDataRecv = procedure (Socket : TKDSocket; PData:Pointer ; DataLen:Integer);
+  TOnClientClose = procedure(Socket:TKDSocket ; ErrorCode:Integer);
   //服务端类
   TKDServerSocket = class(TKDSocket)
   private
     FClients : TList<TKDServerClientSocket>;
+    FOnClientConnect : TOnClientConnect;
+    FOnClientAccept : TOnClientAccept;
+    FOnClientDataRecv : TOnClientDataRecv;
+    FOnClientClose : TOnClientClose;
     function NewClientSocket(SocketHandle:TSocket ;AddrIn : TSockAddrIn):TKDServerClientSocket;
     procedure TryAccept();
     procedure TryRecv();
     procedure TrySend();
   public
+    constructor Create();
     procedure Run();
+    property OnClientConnect:TOnClientConnect read FOnClientConnect write FOnClientConnect;
+    property OnClientAccept : TOnClientAccept read FOnClientAccept Write FOnClientAccept;
+    property OnClientDataRecv : TOnClientDataRecv read FOnClientDataRecv write FOnClientDataRecv;
+    Property OnClientClose : TOnClientClose read FOnClientClose write FOnClientClose;
   end;
 
 implementation
@@ -33,13 +46,20 @@ procedure TKDServerClientSocket.SetSocketData(SocketHandle: TSocket;
 begin
   _fd := SocketHandle;
   _addr_in := AddrIn;
+  FSocketSendBufferSize := GetSendBufferSize();
 end;
 
 { TKDServerSocket }
 
+constructor TKDServerSocket.Create;
+begin
+  inherited;
+  FClients := TList<TKDServerClientSocket>.Create;
+end;
+
 function TKDServerSocket.NewClientSocket(SocketHandle:TSocket ;AddrIn : TSockAddrIn):TKDServerClientSocket;
 var
-  I:Cardinal;
+  I:Integer;
 begin
   for i := 0 to FClients.Count - 1 do
   begin
@@ -59,10 +79,20 @@ begin
 end;
 
 procedure TKDServerSocket.Run;
+var
+  I:Integer;
 begin
   TryAccept();
-  TryRecv();
-  TrySend();
+  //TryRecv();
+  //TrySend();
+
+  for I := 0 to FClients.Count - 1 do
+  begin
+    if FClients[i].ServerSocketIndex <> -1 then
+    begin
+      FClients[i].Run;
+    end;
+  end;
 end;
 
 procedure TKDServerSocket.TryAccept;
@@ -70,12 +100,25 @@ var
   ErrorCode:Integer;
   SocketHandle:TSocket;
   AddrIn:TSockAddrIn;
+  CanAccept :Boolean;
+  IP:String;
 begin
   ErrorCode := Accept(SocketHandle,AddrIn);
   //新的Socket 来了
-  if ErrorCode > 0 then
+  if ErrorCode = 0 then
   begin
-    NewClientSocket(SocketHandle,AddrIn);
+    CanAccept := True;
+    if Assigned(FOnClientAccept) then
+    begin
+      FOnClientAccept(IP,CanAccept);
+      if CanAccept then
+        NewClientSocket(SocketHandle,AddrIn)
+      else
+        Winapi.Winsock2.closesocket(SocketHandle);
+    end else
+    begin
+      NewClientSocket(SocketHandle,AddrIn);
+    end;
   end;
 end;
 
